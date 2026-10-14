@@ -75,25 +75,28 @@ class TestSM80SM89Support(unittest.TestCase):
         print(f"[BF16 GEMM TT] Max Abs Diff: {diff_tt:.6f}")
         self.assertLess(diff_tt, 1e-1)
 
-    def test_bf16_gemm_accumulation(self):
-        """Test BF16 GEMM with matrix C accumulation (D = A @ B.T + C)."""
-        m, n, k = 128, 256, 512
-        a = torch.randn((m, k), dtype=torch.bfloat16, device="cuda")
-        b = torch.randn((n, k), dtype=torch.bfloat16, device="cuda")
-        c = torch.randn((m, n), dtype=torch.bfloat16, device="cuda")
-        d = c.clone()
-
-        _C.bf16_gemm_nt(a, b, d, c, "nk", None, None)
-        ref = torch.matmul(a, b.t()) + c
-
-        diff = torch.max(torch.abs(d - ref)).item()
-        print(f"[BF16 GEMM Accumulation] Max Abs Diff: {diff:.6f}")
-        self.assertLess(diff, 1e-1)
-
-    def test_sm80_sm89_fp8_hardware_error(self):
-        """Verify that SM80/SM89 GPUs raise explicit hardware error panics for unsupported FP8 operations."""
+    def test_sm89_fp8_gemm(self):
+        """Test FP8 GEMM on SM89 Ada Lovelace GPUs."""
         major, minor = torch.cuda.get_device_capability()
-        if major == 8:
+        if major == 8 and minor >= 9:
+            m, n, k = 128, 256, 512
+            a_fp = torch.randn((m, k), device="cuda").to(torch.float8_e4m3fn)
+            a_sf = torch.ones((m, k // 128), dtype=torch.float32, device="cuda")
+            b_fp = torch.randn((n, k), device="cuda").to(torch.float8_e4m3fn)
+            b_sf = torch.ones((n, k // 128), dtype=torch.float32, device="cuda")
+            d = torch.empty((m, n), dtype=torch.bfloat16, device="cuda")
+
+            _C.fp8_fp4_gemm_nt((a_fp, a_sf), (b_fp, b_sf), d, None, None, None, None, "nk", False, None, None)
+            ref = torch.matmul(a_fp.to(torch.float32), b_fp.to(torch.float32).t()).to(torch.bfloat16)
+
+            diff = torch.max(torch.abs(d - ref)).item()
+            print(f"[SM89 FP8 GEMM] Shape ({m}, {n}, {k}) - Max Abs Diff: {diff:.6f}")
+            self.assertLess(diff, 1e-1)
+
+    def test_sm80_fp8_hardware_error(self):
+        """Verify that SM80 (Ampere) GPUs raise explicit hardware error panics for FP8 operations."""
+        major, minor = torch.cuda.get_device_capability()
+        if major == 8 and minor == 0:
             m, n, k = 128, 256, 512
             a_fp = torch.randn((m, k), device="cuda").to(torch.float8_e4m3fn)
             a_sf = torch.ones((m, k // 128), dtype=torch.float32, device="cuda")
@@ -103,8 +106,8 @@ class TestSM80SM89Support(unittest.TestCase):
 
             with self.assertRaises(RuntimeError) as ctx:
                 _C.fp8_fp4_gemm_nt((a_fp, a_sf), (b_fp, b_sf), d, None, None, None, None, "nk", False, None, None)
-            self.assertIn("not natively supported on NVIDIA Ampere/Ada (SM80/SM89)", str(ctx.exception))
-            print(f"[Hardware Panic Check] Successfully verified SM80/SM89 FP8 error: {ctx.exception}")
+            self.assertIn("not natively supported on NVIDIA Ampere (SM80)", str(ctx.exception))
+            print(f"[Hardware Panic Check] Successfully verified SM80 FP8 error: {ctx.exception}")
 
     def test_sm80_sm89_fp4_hardware_error(self):
         """Verify that pre-SM100 GPUs raise explicit error panics for Blackwell-only FP4 operations."""

@@ -7,6 +7,7 @@
 #include "../jit_kernels/impls/sm90_bf16_gemm.hpp"
 #include "../jit_kernels/impls/sm100_fp8_fp4_gemm_1d1d.hpp"
 #include "../jit_kernels/impls/sm100_bf16_gemm.hpp"
+#include "../jit_kernels/impls/sm89_fp8_gemm_1d1d.hpp"
 
 #include "../jit_kernels/impls/smxx_cublaslt.hpp"
 
@@ -101,6 +102,7 @@ static void fp8_fp4_gemm_nt(const std::pair<torch::Tensor, torch::Tensor>& a,
 
     // Type and shape checks
     const auto arch_major = jit->device.get_arch_major();
+    const auto arch_minor = jit->device.get_arch_minor();
 
     if (is_fp4 and arch_major < 10) {
         DG_PANIC("Native FP4 Tensor Core GEMM is only supported on NVIDIA Blackwell (SM100) or newer GPUs.");
@@ -134,8 +136,11 @@ static void fp8_fp4_gemm_nt(const std::pair<torch::Tensor, torch::Tensor>& a,
     } else if (arch_major == 10 and sfa.scalar_type() == torch::kInt) {
         sm100_fp8_fp4_gemm_1d1d(a.first, sfa, b.first, sfb, c, d, m, n, k, gran_k_a, gran_k_b,
                                 major_a, major_b, compiled_dims, resolve_epilogue_class(epilogue_class, c, d, alpha));
-    } else if (arch_major == 8) {
-        DG_PANIC("FP8 Tensor Core GEMM is not natively supported on NVIDIA Ampere/Ada (SM80/SM89) due to hardware limits. Use BF16 GEMM instead.");
+    } else if (arch_major == 8 and arch_minor >= 9) {
+        // Dispatch to SM89 Ada Lovelace FP8 GEMM implementation
+        sm89_fp8_gemm_1d1d(a.first, sfa, b.first, sfb, c, d, m, n, k, major_a, major_b, compiled_dims);
+    } else if (arch_major == 8 and arch_minor == 0) {
+        DG_PANIC("FP8 Tensor Core GEMM is not natively supported on NVIDIA Ampere (SM80) due to hardware limits. Use BF16 GEMM instead.");
     } else {
         DG_HOST_UNREACHABLE("Unsupported architecture or scaling factor types");
     }
@@ -210,9 +215,10 @@ static void m_grouped_fp8_fp4_gemm_nt_contiguous(const std::pair<torch::Tensor, 
 
     // Type and shape checks
     const auto arch_major = jit->device.get_arch_major();
+    const auto arch_minor = jit->device.get_arch_minor();
 
-    if (arch_major == 8) {
-        DG_PANIC("Grouped FP8 GEMM is not supported on SM80/SM89 hardware due to hardware limits.");
+    if (arch_major == 8 and arch_minor < 9) {
+        DG_PANIC("Grouped FP8 GEMM is not supported on SM80 hardware due to hardware limits.");
     }
 
     const auto [m , k ] = check_ab_fp8_fp4(a.first, major_a, arch_major);
@@ -258,6 +264,8 @@ static void m_grouped_fp8_fp4_gemm_nt_contiguous(const std::pair<torch::Tensor, 
                                                      num_groups, m, n, k, gran_k_a, gran_k_b, major_a, major_b,
                                                      compiled_dims, use_psum_layout, ensure_zero_padding, expected_m_for_psum_layout,
                                                      resolve_epilogue_class(epilogue_class, std::nullopt, d));
+    } else if (arch_major == 8 and arch_minor >= 9) {
+        sm89_fp8_gemm_1d1d(a.first, sfa, b.first, sfb, std::nullopt, d, m, n, k, major_a, major_b, compiled_dims);
     } else {
         DG_HOST_UNREACHABLE("Unsupported architecture or scaling factor types");
     }
@@ -299,8 +307,9 @@ static void m_grouped_fp8_fp4_gemm_nt_masked(const std::pair<torch::Tensor, torc
 
     // Type and shape checks
     const auto arch_major = jit->device.get_arch_major();
-    if (arch_major == 8) {
-        DG_PANIC("Masked grouped FP8 GEMM is not supported on SM80/SM89 hardware due to hardware limits.");
+    const auto arch_minor = jit->device.get_arch_minor();
+    if (arch_major == 8 and arch_minor < 9) {
+        DG_PANIC("Masked grouped FP8 GEMM is not supported on SM80 hardware due to hardware limits.");
     }
 
     const auto [num_groups  , m , k ] = check_grouped_ab_fp8_fp4(a.first, major_a, arch_major);
@@ -330,6 +339,8 @@ static void m_grouped_fp8_fp4_gemm_nt_masked(const std::pair<torch::Tensor, torc
         sm100_m_grouped_fp8_fp4_gemm_masked_1d1d(a.first, sfa, b.first, sfb, d, masked_m,
                                                  num_groups, m, n, k, expected_m, gran_k_a, gran_k_b,
                                                  major_a, major_b, compiled_dims, resolve_epilogue_class(epilogue_class, std::nullopt, d));
+    } else if (arch_major == 8 and arch_minor >= 9) {
+        sm89_fp8_gemm_1d1d(a.first, sfa, b.first, sfb, std::nullopt, d, m, n, k, major_a, major_b, compiled_dims);
     } else {
         DG_HOST_UNREACHABLE("Unsupported architecture or scaling factor types");
     }
